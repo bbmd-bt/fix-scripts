@@ -1,5 +1,5 @@
-import json
 import logging
+import os
 import random
 import sys
 import threading
@@ -10,104 +10,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import requests
 
+from .logger import setup_logging
+from .utils import RateLimiter
 
-class MerginLoggerAdapter(logging.LoggerAdapter):
-    def process(self, msg, kwargs):
-        extra = dict(self.extra or {})
-        extra.update(kwargs.get("extra", {}))
-        kwargs["extra"] = extra
-        return msg, kwargs
-
-
-class JsonFormatter(logging.Formatter):
-
-    def format(self, record: logging.LogRecord) -> str:
-        timestamp = self.formatTime(record, self.datefmt)
-        base = {
-            "timestamp": timestamp,
-            "level": record.levelname,
-            "logger": record.name,
-            "run_id": getattr(record, "run_id", None),
-            "msg": record.getMessage(),
-        }
-
-        standard_attrs = {
-            "name",
-            "msg",
-            "args",
-            "levelname",
-            "levelno",
-            "pathname",
-            "filename",
-            "module",
-            "exc_info",
-            "exc_text",
-            "stack_info",
-            "lineno",
-            "funcName",
-            "created",
-            "msecs",
-            "relativeCreated",
-            "thread",
-            "threadName",
-            "processName",
-            "process",
-            "message",
-            "asctime",
-        }
-
-        extra = {k: v for k, v in record.__dict__.items() if k not in standard_attrs}
-        base.update(extra)
-
-        return json.dumps(base, default=str)
-
-
-def setup_logging() -> logging.LoggerAdapter:
-    """Configura logging estruturado para saída em stdout.
-    usa `run_id` para correlacionar entradas de log no mesmo processo.
-    """
-    run_id = uuid.uuid4().hex
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
-
-    root = logging.getLogger()
-    root.handlers = [handler]
-    root.setLevel(logging.INFO)
-    root.propagate = False
-
-    return MerginLoggerAdapter(logging.getLogger(__name__), {"run_id": run_id})
-
-
-EXCEL_FILE = "2B Ativos - Facebook Leads.xlsx"
+EXCEL_FILE = (
+    "C:\\workspace\\repositorios\\fix-scripts\\ploomes\\AGENTE IA - 2B ATIVOS.xlsx"
+)
 ID_COLUMN = "Id do Cliente"
-API_KEY = "B93F970FE9141E1BB21F29E59B19E5B5CE3E9E649ED9359F701E4368A32C3A1714C9DF8F1A7AAC0F947F1BC2402FD84D28D73CE8D9DC8F3ECADBC757D7AEEEA0"
+API_KEY = os.environ.get("APY_KEY")
 REQUESTS_PER_MINUTE = 100
 MAX_WORKERS = 8
 MAX_RETRIES = 5
-BASE_URL = "https://api2.ploomes.com/Contacts"
+BASE_URL = f"{os.environ.get('APY_KEY')}/Contacts"
 HEADERS = {"User-Key": API_KEY}
-
-
-class RateLimiter:
-
-    def __init__(self, max_calls: int, period: float = 60.0) -> None:
-        self.max_calls = max_calls
-        self.period = period
-        self.lock = threading.Lock()
-        self._calls: list[float] = []
-        pass
-
-    def acquire(self, logger: logging.LoggerAdapter):
-        while True:
-            with self.lock:
-                now = time.monotonic()
-                self.calls = [t for t in self._calls if now - t < self.period]
-                if len(self.calls) < self.max_calls:
-                    self._calls.append(now)
-                    return
-                wait = self.period - (now - self._calls[0])
-                logger.debug("rate_limiter.waiting", extra={"wait_s": max(wait, 0.01)})
-            time.sleep(max(wait, 0.01))
 
 
 _rate_limiter = RateLimiter(max_calls=REQUESTS_PER_MINUTE)
