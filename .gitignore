@@ -12,3 +12,9 @@ __pycache__/
 *.log
 # Outros
 *.xlsx
+
+# Copilot Orchestrator temporary files
+.orchestrator/
+.worktrees/
+.copilot-cli/
+.github/instructions/orchestrator-*.instructions.md

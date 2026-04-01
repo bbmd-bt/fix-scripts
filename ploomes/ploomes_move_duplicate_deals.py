@@ -3,6 +3,7 @@
 Groups deals by (product, CNJ, pipeline) and moves all but the oldest deal
 in each group to a trash pipeline, preserving data for potential recovery.
 """
+
 import csv
 import os
 import random
@@ -23,7 +24,7 @@ TRASH_PIPELINE_ID = 999999999
 CREATOR_ID = 110034764
 CNJ_FIELD_KEY = "deal_20E8290A-809B-4CF1-9345-6B264AED7830"
 PRODUCT_FIELD_KEY = "deal_8E8988FD-C687-46F2-92A8-33D99EA6FB91"
-DRY_RUN = os.environ.get("DRY_RUN", "true").lower() in ("true", "1", "yes")
+DRY_RUN = True
 AUDIT_FILE = "moved_duplicate_deals.csv"
 
 API_KEY = os.environ.get("API_KEY")
@@ -311,7 +312,8 @@ def main():
                 )
                 if i % 100 == 0:
                     logger.info(
-                        "progress", extra={"processed": i, "total": len(duplicates_to_move)}
+                        "progress",
+                        extra={"processed": i, "total": len(duplicates_to_move)},
                     )
 
         logger.info(
@@ -330,7 +332,9 @@ def main():
         writer.writeheader()
         writer.writerows(audit_rows)
 
-    logger.info("audit.written", extra={"audit_file": AUDIT_FILE, "rows": len(audit_rows)})
+    logger.info(
+        "audit.written", extra={"audit_file": AUDIT_FILE, "rows": len(audit_rows)}
+    )
     logger.info("run.finished")
 
 
