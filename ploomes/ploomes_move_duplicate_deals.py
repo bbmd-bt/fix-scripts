@@ -10,6 +10,7 @@ import random
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import dotenv
 import requests
@@ -19,13 +20,12 @@ from ploomes.utils import RateLimiter
 
 dotenv.load_dotenv()
 
-PIPELINE_ID = 110066161
-TRASH_PIPELINE_ID = 999999999
+PIPELINE_IDS = [110067326, 110066424, 110066162, 110066163, 110066161, 110065217]
+TRASH_PIPELINE_STAGE_ID = 110355025
 CREATOR_ID = 110034764
 CNJ_FIELD_KEY = "deal_20E8290A-809B-4CF1-9345-6B264AED7830"
 PRODUCT_FIELD_KEY = "deal_8E8988FD-C687-46F2-92A8-33D99EA6FB91"
-DRY_RUN = True
-AUDIT_FILE = "moved_duplicate_deals.csv"
+DRY_RUN = False
 
 API_KEY = os.environ.get("API_KEY")
 BASE_URL = f"{os.environ.get('BASE_URL')}/Deals"
@@ -34,7 +34,7 @@ HEADERS = {"User-Key": API_KEY}
 PAGE_SIZE = 100
 REQUESTS_PER_MINUTE = 60
 MAX_WORKERS = 4
-MAX_RETRIES = 5
+MAX_RETRIES = 20
 
 _rate_limiter = RateLimiter(max_calls=REQUESTS_PER_MINUTE)
 
@@ -68,9 +68,9 @@ def _product_value(deal: dict) -> str:
     return _get_custom_field(other_props, PRODUCT_FIELD_KEY)
 
 
-def _fetch_page(skip: int, logger) -> list[dict]:
+def _fetch_page(skip: int, pipeline_id: int, logger) -> list[dict]:
     params = {
-        "$filter": f"PipelineId eq {PIPELINE_ID} and CreatorId eq {CREATOR_ID}",
+        "$filter": f"PipelineId eq {pipeline_id} and CreatorId eq {CREATOR_ID}",
         "$expand": "OtherProperties",
         "$top": PAGE_SIZE,
         "$skip": skip,
@@ -145,7 +145,10 @@ def _move_deal(deal_id: int, logger) -> tuple[int, str]:
         _rate_limiter.acquire(logger)
         try:
             resp = requests.patch(
-                url, json={"PipelineId": TRASH_PIPELINE_ID}, headers=HEADERS, timeout=30
+                url,
+                json={"StageId": TRASH_PIPELINE_STAGE_ID},
+                headers=HEADERS,
+                timeout=30,
             )
         except requests.RequestException as exc:
             logger.error(
@@ -223,118 +226,154 @@ def main():
     logger.info(
         "run.started",
         extra={
-            "pipeline_id": PIPELINE_ID,
-            "trash_pipeline_id": TRASH_PIPELINE_ID,
+            "pipeline_ids": PIPELINE_IDS,
+            "trash_pipeline_stage_id": TRASH_PIPELINE_STAGE_ID,
             "creator_id": CREATOR_ID,
             "dry_run": DRY_RUN,
         },
     )
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    all_deals: list[dict] = []
-    skip = 0
-    while True:
-        logger.info("fetch.progress", extra={"skip": skip})
-        page = _fetch_page(skip, logger)
-        all_deals.extend(page)
-        if len(page) < PAGE_SIZE:
-            break
-        skip += PAGE_SIZE
+    for pipeline_id in PIPELINE_IDS:
+        audit_file = f"moved_duplicate_deals_{pipeline_id}_{run_ts}.csv"
 
-    logger.info("fetch.complete", extra={"total_deals": len(all_deals)})
-
-    groups = defaultdict(list)
-    for deal in all_deals:
-        cnj = _cnj_value(deal)
-        product = _product_value(deal)
-        key = (product, cnj)
-        groups[key].append(deal)
-
-    duplicates_to_move = []
-    for key, deals in groups.items():
-        if len(deals) > 1:
-            deals.sort(key=lambda d: d.get("CreateDate", ""))
-            keep = deals[0]
-            to_move = deals[1:]
-            product_val, cnj_val = key
-            logger.debug(
-                "duplicates.found",
-                extra={
-                    "product": product_val,
-                    "cnj": cnj_val,
-                    "total": len(deals),
-                    "keeping": keep.get("Id"),
-                    "moving": [d.get("Id") for d in to_move],
-                },
+        all_deals: list[dict] = []
+        skip = 0
+        while True:
+            logger.info(
+                "fetch.progress", extra={"pipeline_id": pipeline_id, "skip": skip}
             )
-            duplicates_to_move.extend(to_move)
+            page = _fetch_page(skip, pipeline_id, logger)
+            all_deals.extend(page)
+            if len(page) < PAGE_SIZE:
+                break
+            skip += PAGE_SIZE
 
-    logger.info(
-        "duplicates.identified",
-        extra={"total_duplicates": len(duplicates_to_move)},
-    )
-
-    if DRY_RUN:
         logger.info(
-            "dry_run.skipping_moves",
-            extra={"would_move": len(duplicates_to_move)},
+            "fetch.complete",
+            extra={"pipeline_id": pipeline_id, "total_deals": len(all_deals)},
         )
-        audit_rows = []
-        for deal in duplicates_to_move:
-            audit_rows.append(
-                {
-                    "deal_id": deal.get("Id", ""),
-                    "cnj": _cnj_value(deal),
-                    "product": _product_value(deal),
-                    "created_date": deal.get("CreateDate", ""),
-                    "status": "dry_run",
-                }
-            )
-    else:
-        results = {"ok": 0, "not_found": 0, "error": 0}
-        audit_rows = []
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(_move_deal, d.get("Id"), logger): d
-                for d in duplicates_to_move
-            }
-            for i, future in enumerate(as_completed(futures), 1):
-                deal = futures[future]
-                _, status = future.result()
-                results[status] += 1
-                audit_rows.append(
-                    {
-                        "deal_id": deal.get("Id", ""),
-                        "cnj": _cnj_value(deal),
-                        "product": _product_value(deal),
-                        "created_date": deal.get("CreateDate", ""),
-                        "status": status,
-                    }
+
+        groups = defaultdict(list)
+        for deal in all_deals:
+            cnj = _cnj_value(deal)
+            product = _product_value(deal)
+            key = (product, cnj)
+            groups[key].append(deal)
+
+        duplicates_to_move = []
+        for key, deals in groups.items():
+            if len(deals) > 1:
+                deals.sort(key=lambda d: d.get("CreateDate", ""))
+                keep = deals[0]
+                to_move = deals[1:]
+                product_val, cnj_val = key
+                logger.debug(
+                    "duplicates.found",
+                    extra={
+                        "pipeline_id": pipeline_id,
+                        "product": product_val,
+                        "cnj": cnj_val,
+                        "total": len(deals),
+                        "keeping": keep.get("Id"),
+                        "moving": [d.get("Id") for d in to_move],
+                    },
                 )
-                if i % 100 == 0:
-                    logger.info(
-                        "progress",
-                        extra={"processed": i, "total": len(duplicates_to_move)},
-                    )
+                duplicates_to_move.extend(to_move)
 
         logger.info(
-            "moves.complete",
+            "duplicates.identified",
             extra={
-                "total": len(duplicates_to_move),
-                "moved": results["ok"],
-                "not_found": results["not_found"],
-                "errors": results["error"],
+                "pipeline_id": pipeline_id,
+                "total_duplicates": len(duplicates_to_move),
             },
         )
 
-    with open(AUDIT_FILE, "w", newline="", encoding="utf-8-sig") as f:
-        fieldnames = ["deal_id", "cnj", "product", "created_date", "status"]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(audit_rows)
+        if DRY_RUN:
+            logger.info(
+                "dry_run.skipping_moves",
+                extra={
+                    "pipeline_id": pipeline_id,
+                    "would_move": len(duplicates_to_move),
+                },
+            )
+            audit_rows = []
+            for deal in duplicates_to_move:
+                audit_rows.append(
+                    {
+                        "deal_id": deal.get("Id", ""),
+                        "old_stage_id": deal.get("StageId", ""),
+                        "cnj": _cnj_value(deal),
+                        "product": _product_value(deal),
+                        "created_date": deal.get("CreateDate", ""),
+                        "status": "dry_run",
+                    }
+                )
+        else:
+            results = {"ok": 0, "not_found": 0, "error": 0}
+            audit_rows = []
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(_move_deal, d.get("Id"), logger): d
+                    for d in duplicates_to_move
+                }
+                for i, future in enumerate(as_completed(futures), 1):
+                    deal = futures[future]
+                    _, status = future.result()
+                    results[status] += 1
+                    audit_rows.append(
+                        {
+                            "deal_id": deal.get("Id", ""),
+                            "old_stage_id": deal.get("StageId", ""),
+                            "cnj": _cnj_value(deal),
+                            "product": _product_value(deal),
+                            "created_date": deal.get("CreateDate", ""),
+                            "status": status,
+                        }
+                    )
+                    if i % 100 == 0:
+                        logger.info(
+                            "progress",
+                            extra={
+                                "pipeline_id": pipeline_id,
+                                "processed": i,
+                                "total": len(duplicates_to_move),
+                            },
+                        )
 
-    logger.info(
-        "audit.written", extra={"audit_file": AUDIT_FILE, "rows": len(audit_rows)}
-    )
+            logger.info(
+                "moves.complete",
+                extra={
+                    "pipeline_id": pipeline_id,
+                    "total": len(duplicates_to_move),
+                    "moved": results["ok"],
+                    "not_found": results["not_found"],
+                    "errors": results["error"],
+                },
+            )
+
+        with open(audit_file, "w", newline="", encoding="utf-8-sig") as f:
+            fieldnames = [
+                "deal_id",
+                "old_stage_id",
+                "cnj",
+                "product",
+                "created_date",
+                "status",
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(audit_rows)
+
+        logger.info(
+            "audit.written",
+            extra={
+                "pipeline_id": pipeline_id,
+                "audit_file": audit_file,
+                "rows": len(audit_rows),
+            },
+        )
+
     logger.info("run.finished")
 
 
