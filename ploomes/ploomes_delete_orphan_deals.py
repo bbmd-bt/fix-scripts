@@ -14,7 +14,7 @@ from ploomes.utils import RateLimiter
 
 dotenv.load_dotenv()
 
-INPUT_FILE = "orphan_deals.csv"
+INPUT_FILE = os.path.join("data", "inputs", "orphan_deals.csv")
 API_KEY = os.environ.get("API_KEY")
 BASE_URL = f"{os.environ.get('BASE_URL')}/Deals"
 HEADERS = {"User-Key": API_KEY}

@@ -21,7 +21,7 @@ RECLAMANTE_FIELD_KEY = os.environ.get("RECLAMANTE_FIELD_KEY")
 CNJ_FIELD_KEY = os.environ.get("CNJ_FIELD_KEY")
 HEADERS = {"User-Key": API_KEY}
 
-OUTPUT_FILE = "orphan_deals.csv"
+OUTPUT_FILE = os.path.join("data", "inputs", "orphan_deals.csv")
 PAGE_SIZE = 100
 REQUESTS_PER_MINUTE = 60
 MAX_RETRIES = 5
@@ -181,6 +181,7 @@ def main():
         "contact_name",
         "origin",
     ]
+    Path(OUTPUT_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FILE, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
