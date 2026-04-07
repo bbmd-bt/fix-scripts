@@ -16,8 +16,8 @@ class RateLimiter:
         while True:
             with self.lock:
                 now = time.monotonic()
-                self.calls = [t for t in self._calls if now - t < self.period]
-                if len(self.calls) < self.max_calls:
+                self._calls = [t for t in self._calls if now - t < self.period]
+                if len(self._calls) < self.max_calls:
                     self._calls.append(now)
                     return
                 wait = self.period - (now - self._calls[0])

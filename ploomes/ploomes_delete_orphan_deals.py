@@ -3,11 +3,13 @@ import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import dotenv
 import requests
 
 from ploomes.logger import setup_logging
+from ploomes.report_manager import ReportManager
 from ploomes.utils import RateLimiter
 
 dotenv.load_dotenv()
@@ -117,11 +119,14 @@ def main():
     logger.info("ids.loaded", extra={"total": len(deal_ids)})
 
     results = {"ok": 0, "not_found": 0, "error": 0}
+    results_details = []
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_delete_deal, did, logger): did for did in deal_ids}
         for i, future in enumerate(as_completed(futures), 1):
-            _, status = future.result()
+            deal_id, status = future.result()
             results[status] += 1
+            results_details.append({"deal_id": deal_id, "status": status})
             if i % 100 == 0:
                 logger.info("progress", extra={"processed": i, "total": len(deal_ids)})
 
@@ -134,6 +139,16 @@ def main():
             "errors": results["error"],
         },
     )
+
+    # Write audit report
+    report_mgr = ReportManager("delete_orphan_deals")
+    report_path = report_mgr.get_full_path()
+    with open(report_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=["deal_id", "status"])
+        writer.writeheader()
+        writer.writerows(results_details)
+
+    logger.info("audit.written", extra={"path": report_path})
 
 
 if __name__ == "__main__":

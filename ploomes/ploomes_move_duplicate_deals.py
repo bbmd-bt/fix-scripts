@@ -16,6 +16,7 @@ import dotenv
 import requests
 
 from ploomes.logger import setup_logging
+from ploomes.report_manager import ReportManager
 from ploomes.utils import RateLimiter
 
 dotenv.load_dotenv()
@@ -235,7 +236,12 @@ def main():
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     for pipeline_id in PIPELINE_IDS:
-        audit_file = f"moved_duplicate_deals_{pipeline_id}_{run_ts}.csv"
+        report_mgr = ReportManager(
+            operation_type="move_duplicate_deals",
+            identifier=pipeline_id,
+            timestamp=run_ts,
+        )
+        audit_file = report_mgr.get_full_path()
 
         all_deals: list[dict] = []
         skip = 0

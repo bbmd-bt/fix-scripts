@@ -14,11 +14,13 @@ import random
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import dotenv
 import requests
 
 from ploomes.logger import setup_logging
+from ploomes.report_manager import ReportManager
 from ploomes.utils import RateLimiter
 
 dotenv.load_dotenv()
@@ -34,7 +36,6 @@ PRODUCT_FIELD_KEY = "deal_8E8988FD-C687-46F2-92A8-33D99EA6FB91"
 
 # Safety: default is dry-run. Set DRY_RUN=false to actually delete.
 DRY_RUN = False
-AUDIT_FILE = "deleted_duplicate_deals.csv"
 
 REQUESTS_PER_MINUTE = 60
 MAX_WORKERS = 4
@@ -185,7 +186,7 @@ def _delete_deal(deal_id: int, logger) -> tuple[int, str]:
             )
             return deal_id, "ok"
 
-        if resp.status_code == 404:
+        if resp.status_code == 401:
             logger.warning(
                 "deal.not_found",
                 extra={
@@ -227,10 +228,10 @@ def _delete_deal(deal_id: int, logger) -> tuple[int, str]:
     return deal_id, "error"
 
 
-def _write_audit(rows: list[dict]) -> None:
-    with open(AUDIT_FILE, "w", newline="", encoding="utf-8") as f:
+def _write_audit(rows: list[dict], path: str) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["deal_id", "cnj", "product", "created_date"]
+            f, fieldnames=["deal_id", "cnj", "product", "created_date", "status"]
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -252,6 +253,9 @@ def main() -> None:
     if not PIPELINE_ID:
         logger.error("config.invalid", extra={"reason": "PIPELINE_ID not set"})
         raise SystemExit(1)
+
+    report_mgr = ReportManager("delete_duplicate_deals")
+    audit_file = report_mgr.get_full_path()
 
     deals = _fetch_all_deals(logger)
     logger.info("fetch.complete", extra={"total_deals": len(deals)})
@@ -281,25 +285,46 @@ def main() -> None:
         },
     )
 
-    _write_audit(ids_to_delete)
-    logger.info("audit.written", extra={"path": AUDIT_FILE})
-
     if DRY_RUN:
         logger.info(
             "dry_run.skipping_deletions", extra={"would_delete": len(ids_to_delete)}
         )
+        # Write audit with dry_run status
+        audit_rows = [
+            {
+                **row,
+                "status": "dry_run",
+            }
+            for row in ids_to_delete
+        ]
+        _write_audit(audit_rows, audit_file)
+        logger.info("audit.written", extra={"path": audit_file})
         return
 
+    # Execute deletions and track results
     results = {"ok": 0, "not_found": 0, "error": 0}
+    audit_rows = []
     deal_ids = [row["deal_id"] for row in ids_to_delete]
+    deal_data_map = {row["deal_id"]: row for row in ids_to_delete}
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_delete_deal, did, logger): did for did in deal_ids}
         for i, future in enumerate(as_completed(futures), 1):
-            _, status = future.result()
-            results[status] = results.get(status, 0) + 1
+            deal_id, status = future.result()
+            results[status] += 1
+            deal_data = deal_data_map[deal_id]
+            audit_rows.append(
+                {
+                    **deal_data,
+                    "status": status,
+                }
+            )
             if i % 50 == 0:
                 logger.info("progress", extra={"processed": i, "total": len(deal_ids)})
+
+    # Write audit with actual deletion results
+    _write_audit(audit_rows, audit_file)
+    logger.info("audit.written", extra={"path": audit_file})
 
     logger.info(
         "run.finished",

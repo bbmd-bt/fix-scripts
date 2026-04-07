@@ -1,25 +1,28 @@
+import csv
 import logging
 import os
 import random
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import pandas as pd
 import requests
 
 from .logger import setup_logging
+from .report_manager import ReportManager
 from .utils import RateLimiter
 
 EXCEL_FILE = (
     "C:\\workspace\\repositorios\\fix-scripts\\ploomes\\AGENTE IA - 2B ATIVOS.xlsx"
 )
 ID_COLUMN = "Id do Cliente"
-API_KEY = os.environ.get("APY_KEY")
+API_KEY = os.environ.get("API_KEY")
 REQUESTS_PER_MINUTE = 100
 MAX_WORKERS = 8
 MAX_RETRIES = 5
-BASE_URL = f"{os.environ.get('APY_KEY')}/Contacts"
+BASE_URL = f"{os.environ.get('BASE_URL')}/Contacts"
 HEADERS = {"User-Key": API_KEY}
 
 
@@ -49,7 +52,7 @@ def delete_contact(contact_id: int, logger: logging.LoggerAdapter) -> tuple[int,
                     "contact_id": contact_id,
                     "error": str(exc),
                     "attempt": attempt,
-                    "duration_ms": int((time.monotonic() - start)),
+                    "duration_ms": int((time.monotonic() - start) * 1000),
                 },
             )
             return contact_id, "error"
@@ -85,7 +88,6 @@ def delete_contact(contact_id: int, logger: logging.LoggerAdapter) -> tuple[int,
                 extra={
                     "contact_id": contact_id,
                     "status_code": response.status_code,
-                    "attempt": attempt,
                     "attempt": attempt,
                     "retry_after_s": retry_after,
                     "duration_ms": duration_ms,
@@ -130,16 +132,20 @@ def delete_contact(contact_id: int, logger: logging.LoggerAdapter) -> tuple[int,
 
 def main():
     logger = setup_logging()
-    logger.info("run.stared", extra={"excel_file": EXCEL_FILE, "id_column": ID_COLUMN})
+    logger.info("run.started", extra={"excel_file": EXCEL_FILE, "id_column": ID_COLUMN})
     ids = load_ids(EXCEL_FILE, ID_COLUMN)
     results = {"ok": 0, "not_found": 0, "error": 0}
+    results_details = []
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(delete_contact, cid, logger): cid for cid in ids}
         for i, future in enumerate(as_completed(futures), 1):
-            _, status = future.result()
+            contact_id, status = future.result()
             results[status] += 1
+            results_details.append({"contact_id": contact_id, "status": status})
             if i % 100 == 0:
                 logger.info("progress", extra={"processed": i, "total": len(ids)})
+
     logger.info(
         "run.finished",
         extra={
@@ -149,6 +155,16 @@ def main():
             "errors": results["error"],
         },
     )
+
+    # Write audit report
+    report_mgr = ReportManager("delete_contacts")
+    report_path = report_mgr.get_full_path()
+    with open(report_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=["contact_id", "status"])
+        writer.writeheader()
+        writer.writerows(results_details)
+
+    logger.info("audit.written", extra={"path": report_path})
 
 
 if __name__ == "__main__":
