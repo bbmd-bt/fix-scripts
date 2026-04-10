@@ -23,7 +23,8 @@ dotenv.load_dotenv()
 
 PIPELINE_IDS = [110067326, 110066424, 110066162, 110066163, 110066161, 110065217]
 TRASH_PIPELINE_STAGE_ID = 110355025
-CREATOR_ID = 110034764
+CREATOR_ID = os.environ.get("CREATOR_ID", "110034764")
+CREATOR_FILTER_MODE = os.environ.get("CREATOR_FILTER_MODE", "all").strip().lower()
 CNJ_FIELD_KEY = "deal_20E8290A-809B-4CF1-9345-6B264AED7830"
 PRODUCT_FIELD_KEY = "deal_8E8988FD-C687-46F2-92A8-33D99EA6FB91"
 DRY_RUN = False
@@ -38,6 +39,16 @@ MAX_WORKERS = 4
 MAX_RETRIES = 20
 
 _rate_limiter = RateLimiter(max_calls=REQUESTS_PER_MINUTE)
+
+
+def _build_fetch_filter(pipeline_id: int) -> str:
+    clauses = [
+        f"PipelineId eq {pipeline_id}",
+        f"StageId ne {TRASH_PIPELINE_STAGE_ID}",
+    ]
+    if CREATOR_FILTER_MODE == "creator_only":
+        clauses.append(f"CreatorId eq {CREATOR_ID}")
+    return " and ".join(clauses)
 
 
 def _get_custom_field(other_props: list, field_key: str) -> str:
@@ -71,7 +82,7 @@ def _product_value(deal: dict) -> str:
 
 def _fetch_page(skip: int, pipeline_id: int, logger) -> list[dict]:
     params = {
-        "$filter": f"PipelineId eq {pipeline_id} and CreatorId eq {CREATOR_ID}",
+        "$filter": _build_fetch_filter(pipeline_id),
         "$expand": "OtherProperties",
         "$top": PAGE_SIZE,
         "$skip": skip,
@@ -180,16 +191,29 @@ def _move_deal(deal_id: int, logger) -> tuple[int, str]:
             )
             return deal_id, "ok"
 
-        if resp.status_code == 401:
+        if resp.status_code == 404:
             logger.warning(
                 "deal.not_found",
                 extra={
                     "deal_id": deal_id,
+                    "status_code": resp.status_code,
                     "attempt": attempt,
                     "duration_ms": duration_ms,
                 },
             )
             return deal_id, "not_found"
+
+        if resp.status_code in (401, 403):
+            logger.warning(
+                "deal.unauthorized",
+                extra={
+                    "deal_id": deal_id,
+                    "status_code": resp.status_code,
+                    "attempt": attempt,
+                    "duration_ms": duration_ms,
+                },
+            )
+            return deal_id, "error"
 
         if resp.status_code == 429:
             retry_after = 2.5**attempt + random.uniform(0, 1)
@@ -230,6 +254,7 @@ def main():
             "pipeline_ids": PIPELINE_IDS,
             "trash_pipeline_stage_id": TRASH_PIPELINE_STAGE_ID,
             "creator_id": CREATOR_ID,
+            "creator_filter_mode": CREATOR_FILTER_MODE,
             "dry_run": DRY_RUN,
         },
     )
@@ -238,7 +263,7 @@ def main():
     for pipeline_id in PIPELINE_IDS:
         report_mgr = ReportManager(
             operation_type="move_duplicate_deals",
-            identifier=pipeline_id,
+            identifier=str(pipeline_id),
             timestamp=run_ts,
         )
         audit_file = report_mgr.get_full_path()
@@ -255,13 +280,23 @@ def main():
                 break
             skip += PAGE_SIZE
 
+        deals_for_grouping = [
+            d for d in all_deals if d.get("StageId") != TRASH_PIPELINE_STAGE_ID
+        ]
+        skipped_in_trash = len(all_deals) - len(deals_for_grouping)
+
         logger.info(
             "fetch.complete",
-            extra={"pipeline_id": pipeline_id, "total_deals": len(all_deals)},
+            extra={
+                "pipeline_id": pipeline_id,
+                "total_deals": len(all_deals),
+                "deals_for_grouping": len(deals_for_grouping),
+                "skipped_in_trash": skipped_in_trash,
+            },
         )
 
         groups = defaultdict(list)
-        for deal in all_deals:
+        for deal in deals_for_grouping:
             cnj = _cnj_value(deal)
             product = _product_value(deal)
             key = (product, cnj)
